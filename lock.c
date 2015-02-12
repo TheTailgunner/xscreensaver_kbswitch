@@ -19,7 +19,9 @@
 
 #include <ctype.h>
 #include <X11/Intrinsic.h>
+#include <X11/XKBlib.h>
 #include <X11/cursorfont.h>
+#include <X11/XKBlib.h>
 #include <X11/Xos.h>		/* for time() */
 #include <time.h>
 #include <sys/time.h>
@@ -27,6 +29,7 @@
 #include "resources.h"
 #include "mlstring.h"
 #include "auth.h"
+#include "kblayout.h"
 
 #ifndef NO_LOCKING              /* (mostly) whole file */
 
@@ -87,6 +90,7 @@ typedef struct info_dialog_data info_dialog_data;
 #define MAX_BYTES_PER_CHAR 8	/* UTF-8 uses no more than 3, I think */
 #define MAX_PASSWD_CHARS   128	/* Longest possible passphrase */
 
+
 struct passwd_dialog_data {
 
   saver_screen_info *prompt_screen;
@@ -126,9 +130,11 @@ struct passwd_dialog_data {
   char *unlock_label;
   char *login_label;
   char *uname_label;
-
   Bool show_uname_p;
-
+  Bool xkblib_ok;
+  
+  struct kb_data kbd;
+  
   XFontStruct *heading_font;
   XFontStruct *body_font;
   XFontStruct *label_font;
@@ -157,6 +163,9 @@ struct passwd_dialog_data {
 
   Dimension passwd_field_x, passwd_field_y;
   Dimension passwd_field_width, passwd_field_height;
+  
+  Dimension kblayout_switch_x, kblayout_switch_y;
+  Dimension kblayout_switch_width, kblayout_switch_height;
 
   Dimension unlock_button_x, unlock_button_y;
   Dimension unlock_button_width, unlock_button_height;
@@ -235,6 +244,12 @@ new_passwd_window (saver_info *si)
 
   pw->date_label = get_string_resource (si->dpy, "dateFormat", "DateFormat");
 
+  if (!(pw->xkblib_ok = initalize_xkblib (si->dpy, &pw->kbd)))
+  {
+	  fprintf (stderr, "XKBLIB ERROR: Probably, XKBlib does not present \
+	  or has incompatible version.\n");
+  }
+  
   if (!pw->heading_label)
     pw->heading_label = strdup("ERROR: RESOURCES NOT INSTALLED CORRECTLY");
   if (!pw->body_label)
@@ -286,7 +301,7 @@ new_passwd_window (saver_info *si)
   pw->button_font = XLoadQueryFont (si->dpy, (f ? f : "fixed"));
   if (!pw->button_font) pw->button_font = XLoadQueryFont (si->dpy, "fixed");
   if (f) free (f);
-
+  
   f = get_string_resource(si->dpy, "passwd.bodyFont", "Dialog.Font");
   pw->body_font = XLoadQueryFont (si->dpy, (f ? f : "fixed"));
   if (!pw->body_font) pw->body_font = XLoadQueryFont (si->dpy, "fixed");
@@ -343,6 +358,8 @@ new_passwd_window (saver_info *si)
   pw->button_background = get_pixel_resource (si->dpy, cmap,
  					      "splash.Button.background",
                                               "Dialog.Button.Background" );
+                                             
+  
   pw->thermo_foreground = get_pixel_resource (si->dpy, cmap,
 					      "passwd.thermometer.foreground",
 					      "Dialog.Thermometer.Foreground");
@@ -576,6 +593,7 @@ make_passwd_window (saver_info *si,
 		    &direction, &ascent, &descent, &overall);
       button_w = overall.width;
       button_h = ascent + descent;
+   
 
       /* Add some horizontal padding inside the button. */
       button_w += ascent;
@@ -588,7 +606,17 @@ make_passwd_window (saver_info *si,
 
       w2 = MAX (w2, button_w);
       h2 += button_h * 1.5;
-
+      
+      
+      /* Layout switch */
+      if (pw->xkblib_ok)
+      {
+		XTextExtents(pw->passwd_font, 
+				pw->kbd.kblayout_name, strlen(pw->kbd.kblayout_name), 
+				&direction, &ascent, &descent, &overall);
+		pw->kblayout_switch_width = overall.width + pw->shadow_width * 2;
+      }
+	  
       /* The "New Login" button */
       pw->login_button_width = 0;
       pw->login_button_height = 0;
@@ -840,7 +868,8 @@ draw_passwd_window (saver_info *si)
   pw->passwd_field_height = (pw->passwd_font->ascent +
 			     pw->passwd_font->descent +
 			     pw->shadow_width);
-
+  pw->kblayout_switch_height = pw->passwd_field_height + pw->shadow_width * 2;
+  
   XFillRectangle (si->dpy, si->passwd_dialog, gc2,
 		  x2 - pw->shadow_width,
 		  y1 - (pw->passwd_font->ascent + pw->passwd_font->descent),
@@ -859,6 +888,11 @@ draw_passwd_window (saver_info *si)
       pw->passwd_field_x = x2 - pw->shadow_width;
       pw->passwd_field_y = y1 - (pw->passwd_font->ascent +
 				 pw->passwd_font->descent);
+		
+	  pw->kblayout_switch_x = pw->passwd_field_x +
+	                          (pw->passwd_field_width - pw->kblayout_switch_width)
+	                          + pw->shadow_width;
+	  pw->kblayout_switch_y = pw->passwd_field_y - pw->shadow_width;
     }
 
   /* The shadow around the text fields
@@ -1126,7 +1160,7 @@ update_passwd_window (saver_info *si, const char *printed_passwd, float ratio)
 	  XFillRectangle (si->dpy, pw->user_entry_pixmap, gc2,
 			  0, 0, rects[0].width, rects[0].height);
 
-	  XDrawString (si->dpy, pw->user_entry_pixmap, gc1,
+ 	 XDrawString (si->dpy, pw->user_entry_pixmap, gc1,
 		       pw->shadow_width,
 		       pw->passwd_font->ascent,
 		       pw->passwd_string, strlen(pw->passwd_string));
@@ -1181,7 +1215,17 @@ update_passwd_window (saver_info *si, const char *printed_passwd, float ratio)
 		      pw->thermo_width-2,
 		      MAX (0, pw->thermo_field_height - y - 2));
     }
-
+    /*The layout switch */
+   if (pw->xkblib_ok && si->unlock_state == ul_read)
+    {
+	 draw_button(si->dpy, si->passwd_dialog, pw->passwd_font,
+	            pw->button_foreground, pw->button_background,
+	            pw->kbd.kblayout_name, pw->kblayout_switch_x,
+	            pw->kblayout_switch_y, pw->kblayout_switch_width,
+	            pw->kblayout_switch_height, pw->shadow_width,
+	            pw->shadow_top, pw->shadow_top, False);
+	}
+	            
   if (pw->button_state_changed_p)
     {
       pw->button_state_changed_p = False;
@@ -1719,6 +1763,20 @@ handle_unlock_button (saver_info *si, XEvent *event)
 				ButtonRelease != event->xany.type);
 }
 
+static void
+handle_kblayout_switch (saver_info *si, XEvent *event)
+{
+	passwd_dialog_data *pw = si->pw_data;
+	Bool mouse_in_box = False;
+	Dimension ex = event->xbutton.x, ey = event->xbutton.y;
+	
+	mouse_in_box = ((ex >= pw->kblayout_switch_x && ex <= pw->kblayout_switch_x + pw->kblayout_switch_width) &&
+					(ey >= pw->kblayout_switch_y && ey <= pw->kblayout_switch_y + pw->kblayout_switch_height));
+	
+	if (ButtonRelease == event->xany.type && mouse_in_box)
+		set_next_kblayout (si->dpy, &(pw->kbd));
+
+}
 
 static void
 finished_typing_passwd (saver_info *si, passwd_dialog_data *pw)
@@ -1942,8 +2000,22 @@ passwd_event_loop (saver_info *si)
 	{
 	  si->pw_data->button_state_changed_p = True;
 	  handle_unlock_button (si, &event.x_event);
+	  if (si->pw_data->xkblib_ok)
+		handle_kblayout_switch (si, &event.x_event);
 	  if (si->pw_data->login_button_p)
 	    handle_login_button (si, &event.x_event);
+	}
+	else if (si->pw_data->xkblib_ok && event.x_event.type == si->pw_data->kbd.xkb_event_type)
+	{
+		XkbEvent *xkbevt = (XkbEvent*) &(event.x_event);
+		/* Check that layout really was changed (XkbStateNotify is fired not only on layout change, */
+		/* but for other changes to any aspect of the keyboard state too) */
+		if (xkbevt->any.xkb_type == XkbStateNotify && 
+									xkbevt->state.group != si->pw_data->kbd.cur_kbgroup) 
+		{ 
+			si->pw_data->kbd.kblayout_name = get_current_kblayout_name (si->dpy);
+			si->pw_data->kbd.cur_kbgroup = xkbevt->state.group;
+		}                                                   
 	}
       else
 	XtDispatchEvent (&event.x_event);
@@ -2018,7 +2090,6 @@ handle_typeahead (saver_info *si)
   si->unlock_typeahead = 0;
 }
 
-
 /**
  * Returns a copy of the input string with trailing whitespace removed.
  * Whitespace is anything considered so by isspace().
@@ -2047,7 +2118,6 @@ remove_trailing_whitespace(const char *str)
 
   return newstr;
 }
-
 
 /*
  * The authentication conversation function.
@@ -2248,7 +2318,6 @@ unlock_p (saver_info *si)
 
   return (si->unlock_state == ul_success);
 }
-
 
 void
 set_locked_p (saver_info *si, Bool locked_p)
